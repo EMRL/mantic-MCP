@@ -51,6 +51,36 @@ export const toolDefinitions: ToolDefinition[] = [
     },
   },
   {
+    name: 'get_report',
+    description: 'Retrieve Mautic report data with date filters and pagination',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        reportId: {
+          type: 'number',
+          description: 'Mautic report ID',
+        },
+        dateFrom: {
+          type: 'string',
+          description: 'Start date (YYYY-MM-DD)',
+        },
+        dateTo: {
+          type: 'string',
+          description: 'End date (YYYY-MM-DD)',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of rows to retrieve (default 100)',
+        },
+        page: {
+          type: 'number',
+          description: 'Page number (default 1)',
+        },
+      },
+      required: ['reportId', 'dateFrom', 'dateTo'],
+    },
+  },
+  {
     name: 'create_report',
     description: 'Create custom report',
     inputSchema: {
@@ -114,6 +144,45 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const response = await client.v1.get('/reports', { params });
     return {
       content: [{ type: 'text', text: `Found ${response.data.total || 0} reports:\n${JSON.stringify(response.data.reports || response.data, null, 2)}` }],
+    };
+  },
+
+  async get_report(client: MauticApiClient, args: any) {
+    const { reportId, dateFrom, dateTo } = args;
+
+    const params = {
+      dateFrom,
+      dateTo,
+      limit: Math.max(1, Math.min(args.limit ?? 100, 200)),
+      page: Math.max(1, args.page ?? 1),
+    };
+
+    const response = await client.v1.get(
+      `/reports/${reportId}`,
+      { params }
+    );
+
+    const report = response.data;
+
+    const result = {
+      reportId,
+      dateFrom: report.dateFrom,
+      dateTo: report.dateTo,
+      totalResults: report.totalResults,
+      returnedResults: Array.isArray(report.data)
+        ? report.data.length
+        : 0,
+      page: params.page,
+      limit: params.limit,
+      dataColumns: report.dataColumns,
+      data: report.data ?? [],
+    };
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2),
+      }],
     };
   },
 
