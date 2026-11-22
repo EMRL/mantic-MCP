@@ -87,6 +87,29 @@ export const toolDefinitions: ToolDefinition[] = [
       required: ['dateFrom', 'dateTo'],
     },
   },
+  {
+    name: 'get_email_click_activity',
+    description: 'Summarize tracked email clicks by date range',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        emailId: {
+          type: 'number',
+          description: 'Email ID to analyze',
+        },
+        dateFrom: {
+          type: 'string',
+          description: 'Start date (YYYY-MM-DD), inclusive',
+        },
+        dateTo: {
+          type: 'string',
+          description: 'End date (YYYY-MM-DD), exclusive',
+        },
+      },
+      required: ['emailId', 'dateFrom', 'dateTo'],
+    },
+  },
+
 
   // NEW Mautic 7 email tools
   {
@@ -297,6 +320,118 @@ export const toolHandlers: Record<string, ToolHandler> = {
         (a, b) => b.sendRecords - a.sendRecords
       ),
       note: 'Read and failure flags reflect current status of emails sent during this period.',
+    };
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2),
+      }],
+    };
+  },
+
+  async get_email_click_activity(client: MauticApiClient, args: any) {
+    const { emailId, dateFrom, dateTo } = args;
+
+    const validDate = (value: unknown): value is string =>
+      typeof value === 'string' &&
+      /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+      !Number.isNaN(Date.parse(value)) &&
+      new Date(value).toISOString().slice(0, 10) === value;
+
+    if (
+      !Number.isInteger(emailId) ||
+      emailId < 1 ||
+      !validDate(dateFrom) ||
+      !validDate(dateTo) ||
+      dateFrom >= dateTo
+    ) {
+      throw new Error('Invalid email ID or date range');
+    }
+
+    const pageSize = 200;
+    const maxRecords = 10000;
+
+    let start = 0;
+    let total = 0;
+    let totalClicks = 0;
+    let unidentifiedClicks = 0;
+
+    const contacts = new Set<string>();
+    const contactLinks = new Set<string>();
+    const links = new Set<string>();
+
+    do {
+      const params = new URLSearchParams({
+        start: String(start),
+        limit: String(pageSize),
+      });
+
+      const filters = [
+        ['email_id', 'eq', String(emailId)],
+        ['date_hit', 'gte', `${dateFrom} 00:00:00`],
+        ['date_hit', 'lt', `${dateTo} 00:00:00`],
+        ['source', 'eq', 'email'],
+      ];
+
+      filters.forEach(([col, expr, val], index) => {
+        params.set(`where[${index}][col]`, col);
+        params.set(`where[${index}][expr]`, expr);
+        params.set(`where[${index}][val]`, val);
+      });
+
+      const response = await client.v1.get('/stats/page_hits', {
+        params,
+      });
+
+      total = Number(response.data.total ?? 0);
+      const rows = response.data.stats;
+
+      if (!Array.isArray(rows) || !Number.isFinite(total)) {
+        throw new Error('Unexpected Mautic statistics response');
+      }
+
+      if (total > maxRecords) {
+        throw new Error(`Result exceeds ${maxRecords} records`);
+      }
+
+      if (rows.length === 0 && start < total) {
+        throw new Error('Incomplete statistics page');
+      }
+
+      for (const row of rows) {
+        if (Number(row.email_id) !== emailId || row.source !== 'email') {
+          throw new Error('Unexpected email click record');
+        }
+
+        totalClicks++;
+
+        const contactId = row.lead_id;
+        const redirectId = row.redirect_id;
+
+        if (contactId != null && redirectId != null) {
+          contacts.add(String(contactId));
+          links.add(String(redirectId));
+          contactLinks.add(`${contactId}:${redirectId}`);
+        } else {
+          unidentifiedClicks++;
+        }
+      }
+
+      start += rows.length;
+    } while (start < total);
+
+    const result = {
+      emailId,
+      dateFrom,
+      dateTo,
+      dateField: 'date_hit',
+      totalClicks,
+      uniqueContacts: contacts.size,
+      uniqueContactLinkPairs: contactLinks.size,
+      uniqueLinks: links.size,
+      unidentifiedClicks,
+      note: 'Unique contact/link pairs are not necessarily identical to Mautic reported unique hits.',
     };
 
     return {
