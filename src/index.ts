@@ -33,6 +33,21 @@ const MAUTIC_CLIENT_ID = process.env.MAUTIC_CLIENT_ID;
 const MAUTIC_CLIENT_SECRET = process.env.MAUTIC_CLIENT_SECRET;
 const MAUTIC_TOKEN_ENDPOINT = process.env.MAUTIC_TOKEN_ENDPOINT;
 
+// Read-only by default. Explicitly opt in to write operations.
+const MCP_ALLOW_WRITES = process.env.MCP_ALLOW_WRITES === '1';
+
+const READ_ONLY_TOOLS = new Set([
+  'list_emails',
+  'get_email',
+  'get_email_stats',
+  'get_email_activity',
+  'get_email_click_activity',
+  'get_email_unsubscribe_activity',
+  'get_email_monthly_report',
+  'list_reports',
+  'get_report',
+]);
+
 if (!MAUTIC_BASE_URL || !MAUTIC_CLIENT_ID || !MAUTIC_CLIENT_SECRET || !MAUTIC_TOKEN_ENDPOINT) {
   throw new Error('Missing required Mautic environment variables: MAUTIC_BASE_URL, MAUTIC_CLIENT_ID, MAUTIC_CLIENT_SECRET, MAUTIC_TOKEN_ENDPOINT');
 }
@@ -69,14 +84,29 @@ class MauticServer {
       process.exit(0);
     });
   }
-
+  
   private setupToolHandlers() {
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: allToolDefinitions,
+      tools: MCP_ALLOW_WRITES
+        ? allToolDefinitions
+        : allToolDefinitions.filter(tool =>
+            READ_ONLY_TOOLS.has(tool.name)
+          ),
     }));
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
+        // Enforce read-only mode even for direct tool calls.
+        if (
+          !MCP_ALLOW_WRITES &&
+          !READ_ONLY_TOOLS.has(request.params.name)
+        ) {
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            `Tool "${request.params.name}" is disabled in read-only mode`
+          );
+        }
+
         return await dispatchTool(
           request.params.name,
           this.apiClient,
@@ -86,14 +116,22 @@ class MauticServer {
         if (error instanceof McpError) {
           throw error;
         }
+
         if (axios.isAxiosError(error)) {
           const message = MauticApiClient.extractErrorMessage(error);
           return {
-            content: [{ type: 'text', text: `Mautic API Error: ${message}` }],
+            content: [{
+              type: 'text',
+              text: `Mautic API Error: ${message}`,
+            }],
             isError: true,
           };
         }
-        throw new McpError(ErrorCode.InternalError, `Unexpected error: ${error}`);
+
+        throw new McpError(
+          ErrorCode.InternalError,
+          `Unexpected error: ${error}`
+        );
       }
     });
   }
