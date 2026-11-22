@@ -69,6 +69,24 @@ export const toolDefinitions: ToolDefinition[] = [
       required: ['emailId'],
     },
   },
+  {
+    name: 'get_email_activity',
+    description: 'Summarize email sends and engagement by date range',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        dateFrom: {
+          type: 'string',
+          description: 'Start date (YYYY-MM-DD), inclusive',
+        },
+        dateTo: {
+          type: 'string',
+          description: 'End date (YYYY-MM-DD), exclusive',
+        },
+      },
+      required: ['dateFrom', 'dateTo'],
+    },
+  },
 
   // NEW Mautic 7 email tools
   {
@@ -171,6 +189,114 @@ export const toolHandlers: Record<string, ToolHandler> = {
       publishUp: email.publishUp,
       publishDown: email.publishDown,
       statisticsScope: 'Cumulative, not date-filtered',
+    };
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2),
+      }],
+    };
+  },
+
+
+  async get_email_activity(client: MauticApiClient, args: any) {
+    const { dateFrom, dateTo } = args;
+
+    const validDate = (value: unknown): value is string =>
+      typeof value === 'string' &&
+      /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+      !Number.isNaN(Date.parse(value)) &&
+      new Date(value).toISOString().slice(0, 10) === value;
+
+    if (!validDate(dateFrom) || !validDate(dateTo) || dateFrom >= dateTo) {
+      throw new Error('Provide a valid dateFrom before dateTo (YYYY-MM-DD)');
+    }
+
+    const pageSize = 200;
+    const maxRecords = 10000;
+    let start = 0;
+    let total = 0;
+
+    const emails = new Map<number, {
+      emailId: number;
+      sendRecords: number;
+      readFlagged: number;
+      failed: number;
+    }>();
+
+    do {
+      const params = new URLSearchParams({
+        start: String(start),
+        limit: String(pageSize),
+      });
+
+      params.set('where[0][col]', 'date_sent');
+      params.set('where[0][expr]', 'gte');
+      params.set('where[0][val]', `${dateFrom} 00:00:00`);
+
+      params.set('where[1][col]', 'date_sent');
+      params.set('where[1][expr]', 'lt');
+      params.set('where[1][val]', `${dateTo} 00:00:00`);
+
+      const response = await client.v1.get('/stats/email_stats', {
+        params,
+      });
+
+      total = Number(response.data.total ?? 0);
+      const rows = response.data.stats;
+
+      if (!Array.isArray(rows) || !Number.isFinite(total)) {
+        throw new Error('Unexpected Mautic statistics response');
+      }
+
+      if (total > maxRecords) {
+        throw new Error(`Result exceeds ${maxRecords} records`);
+      }
+
+      if (rows.length === 0 && start < total) {
+        throw new Error('Mautic returned an incomplete statistics page');
+      }
+
+      for (const row of rows) {
+        const emailId = Number(row.email_id);
+
+        if (!Number.isInteger(emailId)) {
+          throw new Error('Invalid email ID in statistics response');
+        }
+
+        const entry = emails.get(emailId) ?? {
+          emailId,
+          sendRecords: 0,
+          readFlagged: 0,
+          failed: 0,
+        };
+
+        entry.sendRecords++;
+
+        if (row.is_read === true || String(row.is_read) === '1') {
+          entry.readFlagged++;
+        }
+
+        if (row.is_failed === true || String(row.is_failed) === '1') {
+          entry.failed++;
+        }
+
+        emails.set(emailId, entry);
+      }
+
+      start += rows.length;
+    } while (start < total);
+
+    const result = {
+      dateFrom,
+      dateTo,
+      dateField: 'date_sent',
+      totalRecords: start,
+      emails: [...emails.values()].sort(
+        (a, b) => b.sendRecords - a.sendRecords
+      ),
+      note: 'Read and failure flags reflect current status of emails sent during this period.',
     };
 
     return {
