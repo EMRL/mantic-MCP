@@ -109,6 +109,24 @@ export const toolDefinitions: ToolDefinition[] = [
       required: ['emailId', 'dateFrom', 'dateTo'],
     },
   },
+  {
+    name: 'get_email_unsubscribe_activity',
+    description: 'Summarize email unsubscribe events by date range',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        dateFrom: {
+          type: 'string',
+          description: 'Start date (YYYY-MM-DD), inclusive',
+        },
+        dateTo: {
+          type: 'string',
+          description: 'End date (YYYY-MM-DD), exclusive',
+        },
+      },
+      required: ['dateFrom', 'dateTo'],
+    },
+  },
 
 
   // NEW Mautic 7 email tools
@@ -221,7 +239,6 @@ export const toolHandlers: Record<string, ToolHandler> = {
       }],
     };
   },
-
 
   async get_email_activity(client: MauticApiClient, args: any) {
     const { dateFrom, dateTo } = args;
@@ -432,6 +449,118 @@ export const toolHandlers: Record<string, ToolHandler> = {
       uniqueLinks: links.size,
       unidentifiedClicks,
       note: 'Unique contact/link pairs are not necessarily identical to Mautic reported unique hits.',
+    };
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2),
+      }],
+    };
+  },
+
+  async get_email_unsubscribe_activity(client: MauticApiClient, args: any) {
+    const { dateFrom, dateTo } = args;
+
+    const validDate = (value: unknown): value is string =>
+      typeof value === 'string' &&
+      /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+      !Number.isNaN(Date.parse(value)) &&
+      new Date(value).toISOString().slice(0, 10) === value;
+
+    if (!validDate(dateFrom) || !validDate(dateTo) || dateFrom >= dateTo) {
+      throw new Error('Provide a valid dateFrom before dateTo (YYYY-MM-DD)');
+    }
+
+    const pageSize = 200;
+    const maxRecords = 10000;
+
+    let start = 0;
+    let total = 0;
+    let unattributed = 0;
+
+    const emails = new Map<number, number>();
+
+    do {
+      const params = new URLSearchParams({
+        start: String(start),
+        limit: String(pageSize),
+      });
+
+      const filters = [
+        ['date_added', 'gte', `${dateFrom} 00:00:00`],
+        ['date_added', 'lt', `${dateTo} 00:00:00`],
+        ['channel', 'eq', 'email'],
+        ['reason', 'eq', '1'],
+      ];
+
+      filters.forEach(([col, expr, val], index) => {
+        params.set(`where[${index}][col]`, col);
+        params.set(`where[${index}][expr]`, expr);
+        params.set(`where[${index}][val]`, val);
+      });
+
+      const response = await client.v1.get('/stats/lead_donotcontact', {
+        params,
+      });
+
+      total = Number(response.data.total ?? 0);
+      const rows = response.data.stats;
+
+      if (
+        !Array.isArray(rows) ||
+        !Number.isInteger(total) ||
+        total < 0
+      ) {
+        throw new Error('Unexpected Mautic unsubscribe response');
+      }
+
+      if (total > maxRecords) {
+        throw new Error(`Result exceeds ${maxRecords} records`);
+      }
+
+      if (rows.length === 0 && start < total) {
+        throw new Error('Incomplete unsubscribe statistics page');
+      }
+
+      for (const row of rows) {
+        if (row.channel !== 'email' || Number(row.reason) !== 1) {
+          throw new Error('Unexpected do-not-contact record');
+        }
+
+        const emailId = Number(row.channel_id);
+
+        if (
+          row.channel_id == null ||
+          !Number.isInteger(emailId) ||
+          emailId < 1
+        ) {
+          unattributed++;
+          continue;
+        }
+
+        emails.set(emailId, (emails.get(emailId) ?? 0) + 1);
+      }
+
+      start += rows.length;
+    } while (start < total);
+
+    const result = {
+      dateFrom,
+      dateTo,
+      dateField: 'date_added',
+      channel: 'email',
+      reason: 1,
+      totalUnsubscribes: start,
+      attributedUnsubscribes: start - unattributed,
+      unattributedUnsubscribes: unattributed,
+      emails: [...emails.entries()]
+        .map(([emailId, unsubscribes]) => ({
+          emailId,
+          unsubscribes,
+        }))
+        .sort((a, b) => b.unsubscribes - a.unsubscribes),
+      note: 'Counts unsubscribe events by occurrence date. Email attribution uses channel_id and may reference emails sent before this period.',
     };
 
     return {
