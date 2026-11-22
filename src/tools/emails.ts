@@ -149,12 +149,35 @@ export const toolHandlers: Record<string, ToolHandler> = {
       content: [{ type: 'text', text: `Email template created successfully:\n${JSON.stringify(response.data.email, null, 2)}` }],
     };
   },
-
+ 
   async get_email_stats(client: MauticApiClient, args: any) {
     const { emailId } = args;
-    const response = await client.v1.get(`/emails/${emailId}/stats`);
+
+    const response = await client.v1.get(`/emails/${emailId}`);
+    const email = response.data.email;
+
+    const sent = Number(email.sentCount ?? 0);
+    const read = Number(email.readCount ?? 0);
+
+    const result = {
+      id: email.id,
+      name: email.name,
+      subject: email.subject,
+      sentCount: sent,
+      readCount: read,
+      readRate: sent > 0
+        ? `${((read / sent) * 100).toFixed(1)}%`
+        : '0.0%',
+      publishUp: email.publishUp,
+      publishDown: email.publishDown,
+      statisticsScope: 'Cumulative, not date-filtered',
+    };
+
     return {
-      content: [{ type: 'text', text: `Email statistics:\n${JSON.stringify(response.data.stats, null, 2)}` }],
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2),
+      }],
     };
   },
 
